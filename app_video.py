@@ -1,42 +1,64 @@
 import streamlit as st
+from pathlib import Path
 from compress_video import compress_video
 from decompress_video import decompress_video
-from pathlib import Path
-import tempfile
 
-st.set_page_config(page_title="SoulGenesis Video", page_icon="🎥")
-st.title("🎥 SoulGenesis – Video Compression & Reconstruction")
+st.set_page_config(page_title="SoulGenesis Video", page_icon="🎥", layout="centered")
+st.title("🎥 SoulGenesis Video Compressor")
 
-# --- Compress video ---
-st.header("Compress a video → .genesisvid")
-video_file = st.file_uploader("Upload MP4/MOV", type=["mp4", "mov", "mpeg4"], key="video_upload")
-palette_every_n_frames = st.number_input("Palette sample every N frames", min_value=1, value=10)
+st.markdown("### Compress a video → `.genesisvid`")
+uploaded_file = st.file_uploader("Upload MP4/MOV", type=["mp4", "mov", "mpeg4"], help="Limit 200MB per file")
+palette_sample_rate = st.number_input("Palette sample every N frames", min_value=1, value=10)
 frame_limit = st.number_input("Limit frames (0 = all)", min_value=0, value=0)
 
-if video_file:
-    with tempfile.NamedTemporaryFile(delete=False, suffix=Path(video_file.name).suffix) as tmp_in:
-        tmp_in.write(video_file.read())
-        tmp_in_path = tmp_in.name
+if st.button("Start Compression"):
+    if uploaded_file is not None:
+        out_path = Path("compressed.genesisvid")
+        compress_video(uploaded_file, out_path, palette_sample_rate, frame_limit)
 
-    out_path = Path(tempfile.gettempdir()) / (Path(video_file.name).stem + ".genesisvid")
-    compress_video(tmp_in_path, out_path, palette_every_n_frames, frame_limit)
+        st.success("✅ Video compressed successfully!")
 
-    st.success("✅ Video compressed successfully!")
-    with open(out_path, "rb") as f:
-        st.download_button("⬇️ Download Compressed File", f, file_name=out_path.name)
+        # Show size difference
+        original_size = uploaded_file.size / (1024 * 1024)
+        compressed_size = out_path.stat().st_size / (1024 * 1024)
+        reduction = (1 - compressed_size / original_size) * 100
+        st.write(f"**Original size:** {original_size:.2f} MB")
+        st.write(f"**Compressed size:** {compressed_size:.2f} MB")
+        st.write(f"**Reduction:** {reduction:.1f}% smaller")
 
-# --- Decompress video ---
-st.header("Reconstruct video from .genesisvid")
-genesisvid_file = st.file_uploader("Upload .genesisvid", type=["genesisvid"], key="genesisvid_upload")
+        # Download compressed file
+        with open(out_path, "rb") as f:
+            st.download_button(
+                label="⬇️ Download Compressed File",
+                data=f,
+                file_name=out_path.name,
+                mime="application/octet-stream"
+            )
+    else:
+        st.warning("⚠️ Please upload a video first.")
 
-if genesisvid_file:
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".genesisvid") as tmp_in:
-        tmp_in.write(genesisvid_file.read())
-        tmp_in_path = tmp_in.name
+st.markdown("---")
+st.markdown("### Reconstruct video from `.genesisvid`")
+uploaded_genesis = st.file_uploader("Upload `.genesisvid`", type=["genesisvid"], help="Limit 200MB per file")
 
-    out_path = Path(tempfile.gettempdir()) / "reconstructed_video.mp4"
-    decompress_video(tmp_in_path, out_path)
+if st.button("Start Decompression"):
+    if uploaded_genesis is not None:
+        out_video_path = Path("reconstructed.mp4")
+        decompress_video(uploaded_genesis, out_video_path)
 
-    st.success("✅ Video reconstructed successfully!")
-    with open(out_path, "rb") as f:
-        st.download_button("⬇️ Download Reconstructed Video", f, file_name="reconstructed_video.mp4")
+        st.success("✅ Video reconstructed successfully!")
+
+        # Show decompressed file size
+        reconstructed_size = out_video_path.stat().st_size / (1024 * 1024)
+        st.write(f"**Reconstructed size:** {reconstructed_size:.2f} MB")
+
+        # Download decompressed file
+        with open(out_video_path, "rb") as f:
+            st.download_button(
+                label="⬇️ Download Reconstructed Video",
+                data=f,
+                file_name=out_video_path.name,
+                mime="video/mp4"
+            )
+    else:
+        st.warning("⚠️ Please upload a `.genesisvid` file first.")
