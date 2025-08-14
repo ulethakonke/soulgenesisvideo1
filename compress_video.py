@@ -5,10 +5,13 @@ import zlib
 from PIL import Image
 from pathlib import Path
 
-def compress_video(in_path, out_path, palette_sample_rate=10, frame_limit=0):
+def compress_video(in_path, out_path, palette_sample_rate=10, frame_limit=0, max_colors=64, quality_params=None):
     """
     Compress a video to GENESISVID-1 format using palette-based compression
     """
+    if quality_params is None:
+        quality_params = {"skip_frames": 2, "resize_factor": 0.6}
+    
     cap = cv2.VideoCapture(str(in_path))
     
     if not cap.isOpened():
@@ -18,6 +21,9 @@ def compress_video(in_path, out_path, palette_sample_rate=10, frame_limit=0):
     fps = cap.get(cv2.CAP_PROP_FPS)
     if fps <= 0:
         fps = 24  # Default fallback
+    
+    # Adjust FPS based on frame skipping
+    adjusted_fps = fps / quality_params["skip_frames"]
     
     frames = []
     frame_count = 0
@@ -30,13 +36,23 @@ def compress_video(in_path, out_path, palette_sample_rate=10, frame_limit=0):
             break
         if frame_limit and frame_count >= frame_limit:
             break
-        if frame_count % palette_sample_rate == 0:
+        
+        # Skip frames for compression
+        if frame_count % (palette_sample_rate * quality_params["skip_frames"]) == 0:
             # Convert BGR to RGB
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            frames.append(frame_rgb)
+            
+            # Resize frame for compression
+            resize_factor = quality_params["resize_factor"]
+            h, w = frame_rgb.shape[:2]
+            new_h, new_w = int(h * resize_factor), int(w * resize_factor)
+            frame_resized = cv2.resize(frame_rgb, (new_w, new_h), interpolation=cv2.INTER_AREA)
+            
+            frames.append(frame_resized)
+            
             # Collect pixels for palette (sample subset to avoid memory issues)
-            pixels = frame_rgb.reshape(-1, 3)
-            step = max(1, len(pixels) // 10000)  # Sample at most 10k pixels per frame
+            pixels = frame_resized.reshape(-1, 3)
+            step = max(1, len(pixels) // 1000)  # Much smaller sample
             all_pixels.extend(pixels[::step])
         frame_count += 1
     
@@ -47,14 +63,14 @@ def compress_video(in_path, out_path, palette_sample_rate=10, frame_limit=0):
     
     h, w = frames[0].shape[:2]
     
-    # Generate palette using k-means-like approach (simplified)
+    # Limit pixels for palette generation
     all_pixels = np.array(all_pixels)
-    if len(all_pixels) > 50000:  # Limit pixels for performance
-        indices = np.random.choice(len(all_pixels), 50000, replace=False)
+    if len(all_pixels) > 5000:  # Much smaller limit
+        indices = np.random.choice(len(all_pixels), 5000, replace=False)
         all_pixels = all_pixels[indices]
     
-    # Create palette (256 colors max for 8-bit indices)
-    palette = generate_palette(all_pixels, 256)
+    # Create smaller palette
+    palette = generate_palette(all_pixels, max_colors)
     
     # Create palette image for PIL
     pal_img = Image.new("P", (1, 1))
@@ -66,31 +82,32 @@ def compress_video(in_path, out_path, palette_sample_rate=10, frame_limit=0):
         flat_palette.append(0)
     pal_img.putpalette(flat_palette)
     
-    # Convert frames to palette indices
+    # Convert frames to palette indices with better compression
     compressed_frames = []
     for frame in frames:
         # Convert to PIL Image
         pil_frame = Image.fromarray(frame, mode="RGB")
-        # Apply palette
-        frame_p = pil_frame.quantize(palette=pal_img)
+        # Apply palette with dithering for better quality
+        frame_p = pil_frame.quantize(palette=pal_img, dither=Image.FLOYDSTEINBERG)
         # Get indices
-        indices = np.array(frame_p)
-        # Compress indices
-        compressed = zlib.compress(indices.tobytes())
+        indices = np.array(frame_p, dtype=np.uint8)
+        
+        # Use higher compression level
+        compressed = zlib.compress(indices.tobytes(), level=9)
         compressed_frames.append(compressed.hex())
     
-    # Save to JSON format
+    # Save to JSON format with minimal whitespace
     data = {
         "magic": "GENESISVID-1",
         "width": w,
         "height": h,
-        "fps": fps,
+        "fps": adjusted_fps,  # Use adjusted FPS
         "frames": compressed_frames,
         "palette": palette.tolist()
     }
     
     with open(out_path, "w") as f:
-        json.dump(data, f, separators=(',', ':'))
+        json.dump(data, f, separators=(',', ':'))  # No whitespace
 
 def generate_palette(pixels, num_colors):
     """
@@ -99,8 +116,8 @@ def generate_palette(pixels, num_colors):
     if len(pixels) == 0:
         return np.zeros((num_colors, 3), dtype=np.uint8)
     
-    # Simple palette generation - you could use sklearn.cluster.KMeans for better results
-    # For now, use uniform sampling across color space
+    # Simple but effective palette generation
+    # Reduce colors by quantizing each channel
     unique_pixels = np.unique(pixels.reshape(-1, pixels.shape[-1]), axis=0)
     
     if len(unique_pixels) <= num_colors:
@@ -109,9 +126,16 @@ def generate_palette(pixels, num_colors):
         palette[:len(unique_pixels)] = unique_pixels
         return palette
     
-    # Sample uniformly across the unique pixels
+    # Use uniform sampling in RGB space for better distribution
     indices = np.linspace(0, len(unique_pixels) - 1, num_colors, dtype=int)
-    return unique_pixels[indices]
+    selected_colors = unique_pixels[indices]
+    
+    # Ensure we have exactly num_colors
+    if len(selected_colors) < num_colors:
+        padding = np.zeros((num_colors - len(selected_colors), 3), dtype=np.uint8)
+        selected_colors = np.vstack([selected_colors, padding])
+    
+    return selected_colors
 
 def decompress_video(in_path, out_path):
     """

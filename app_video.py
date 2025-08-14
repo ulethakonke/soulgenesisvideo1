@@ -9,6 +9,9 @@ st.title("🎥 SoulGenesis Video Compressor")
 st.header("Compress a video → .genesisvid")
 uploaded_file = st.file_uploader("Upload MP4/MOV", type=["mp4", "mov", "mpeg4"], key="compress_uploader")
 
+if "compress_complete" not in st.session_state:
+    st.session_state.compress_complete = False
+
 palette_sample_rate = st.number_input(
     "Palette sample every N frames", min_value=1, value=10
 )
@@ -16,7 +19,15 @@ frame_limit = st.number_input(
     "Limit frames (0 = all)", min_value=0, value=0
 )
 
-if uploaded_file is not None:
+col1, col2 = st.columns([1, 1])
+with col1:
+    quality = st.selectbox("Compression Quality", 
+                          ["High", "Medium", "Low"], 
+                          index=1)
+with col2:
+    max_colors = st.number_input("Max palette colors", min_value=16, max_value=256, value=64)
+
+if uploaded_file is not None and not st.session_state.compress_complete:
     try:
         # Create unique temp file paths
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_input:
@@ -26,20 +37,45 @@ if uploaded_file is not None:
         # Create output path
         out_path = str(Path(in_path).with_suffix(".genesisvid"))
         
-        # Compress the video
-        compress_video(in_path, out_path, palette_sample_rate, frame_limit)
+        # Set quality parameters
+        quality_params = {
+            "High": {"skip_frames": 1, "resize_factor": 0.8},
+            "Medium": {"skip_frames": 2, "resize_factor": 0.6}, 
+            "Low": {"skip_frames": 3, "resize_factor": 0.4}
+        }
+        
+        with st.spinner("Compressing video..."):
+            # Compress the video
+            result = compress_video(in_path, out_path, palette_sample_rate, frame_limit, 
+                         max_colors, quality_params[quality])
         
         st.success("✅ Compression complete!")
         
         # Read the compressed file and offer download
         with open(out_path, "rb") as f:
             compressed_data = f.read()
-            st.download_button(
-                label="⬇ Download Compressed File (.genesisvid)",
-                data=compressed_data,
-                file_name="compressed.genesisvid",
-                mime="application/octet-stream"
-            )
+            
+        # Show compression stats
+        original_size = len(uploaded_file.getvalue())
+        compressed_size = len(compressed_data)
+        compression_ratio = original_size / compressed_size if compressed_size > 0 else 0
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Original Size", f"{original_size/1024/1024:.1f} MB")
+        with col2:
+            st.metric("Compressed Size", f"{compressed_size/1024/1024:.1f} MB") 
+        with col3:
+            st.metric("Compression Ratio", f"{compression_ratio:.1f}x")
+            
+        st.download_button(
+            label="⬇ Download Compressed File (.genesisvid)",
+            data=compressed_data,
+            file_name="compressed.genesisvid",
+            mime="application/octet-stream"
+        )
+        
+        st.session_state.compress_complete = True
         
         # Clean up temporary files
         try:
@@ -50,6 +86,12 @@ if uploaded_file is not None:
             
     except Exception as e:
         st.error(f"Error during compression: {str(e)}")
+
+# Reset button
+if st.session_state.compress_complete:
+    if st.button("🔄 Compress Another Video"):
+        st.session_state.compress_complete = False
+        st.rerun()
 
 st.header("Reconstruct video from .genesisvid")
 uploaded_genesis = st.file_uploader("Upload .genesisvid", type=["genesisvid"], key="decompress_uploader")
