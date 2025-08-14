@@ -155,9 +155,10 @@ def decompress_video(in_path, out_path):
     fps = float(data.get("fps", 24))
     skip_frames = data.get("skip_frames", 1)
     
-    # Calculate the correct playback FPS
-    # Since we skipped frames during compression, we need to account for that
-    playback_fps = fps / skip_frames
+    # The playback FPS should be the original FPS
+    # We skipped frames during compression, so we have fewer frames
+    # but they should play at the original speed to maintain timing
+    playback_fps = fps
     
     frames_hex = data["frames"]
     palette = np.array(data["palette"], dtype=np.uint8)
