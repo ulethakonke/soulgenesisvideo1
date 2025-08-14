@@ -159,14 +159,17 @@ def decompress_video(in_path, out_path):
     frame_interval = data.get("frame_interval", 1)
     
     # Calculate the correct playback FPS
-    # If we took every Nth frame, we need to play back at fps/N to maintain correct timing
-    playback_fps = fps / frame_interval
+    calculated_fps = fps / frame_interval
     
-    # Ensure minimum playback FPS for smoothness
-    if playback_fps < 15:
-        playback_fps = 15
+    # Ensure FPS is between 20-30 for natural motion
+    if calculated_fps < 20:
+        playback_fps = 20
+    elif calculated_fps > 30:
+        playback_fps = 30
+    else:
+        playback_fps = calculated_fps
     
-    print(f"Original FPS: {fps}, Frame interval: {frame_interval}, Playback FPS: {playback_fps}")
+    print(f"Original FPS: {fps}, Frame interval: {frame_interval}, Calculated FPS: {calculated_fps:.1f}, Final playback FPS: {playback_fps}")
     
     frames_hex = data["frames"]
     palette = np.array(data["palette"], dtype=np.uint8)

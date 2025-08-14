@@ -14,7 +14,7 @@ st.header("Compress a video → .genesisvid")
 uploaded_file = st.file_uploader("Upload MP4/MOV", type=["mp4", "mov", "mpeg4"], key="compress_uploader")
 
 palette_sample_rate = st.number_input(
-    "Sample every N frames", min_value=1, value=3, help="Lower = better quality, larger file"
+    "Sample every N frames", min_value=1, value=2, help="1=Best quality, 2=Good balance, 3+=Smaller file"
 )
 frame_limit = st.number_input(
     "Limit frames (0 = all)", min_value=0, value=0
@@ -26,7 +26,7 @@ with col1:
                           ["High", "Medium", "Low"], 
                           index=1)
 with col2:
-    max_colors = st.number_input("Max palette colors", min_value=16, max_value=256, value=64)
+    max_colors = st.number_input("Max palette colors", min_value=16, max_value=256, value=128, help="More colors = better quality, larger file")
 
 if uploaded_file is not None and not st.session_state.compress_complete:
     try:
