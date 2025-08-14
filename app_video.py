@@ -1,204 +1,133 @@
-import cv2
-import numpy as np
-import json
-import zlib
-from PIL import Image
+import streamlit as st
+import tempfile
+import os
 from pathlib import Path
+from compress_video import compress_video, decompress_video
 
-def compress_video(in_path, out_path, palette_sample_rate=10, frame_limit=0, max_colors=64, quality_params=None):
-    """
-    Compress a video to GENESISVID-1 format using palette-based compression
-    """
-    if quality_params is None:
-        quality_params = {"skip_frames": 2, "resize_factor": 0.6}
-    
-    cap = cv2.VideoCapture(str(in_path))
-    
-    if not cap.isOpened():
-        raise ValueError(f"Could not open video file: {in_path}")
-    
-    # Get video properties before processing
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    if fps <= 0:
-        fps = 24  # Default fallback
-    
-    # Adjust FPS based on frame skipping
-    adjusted_fps = fps / quality_params["skip_frames"]
-    
-    frames = []
-    frame_count = 0
-    all_pixels = []
-    
-    # First pass: collect frames and pixels for palette generation
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-        if frame_limit and frame_count >= frame_limit:
-            break
-        
-        # Skip frames for compression
-        if frame_count % (palette_sample_rate * quality_params["skip_frames"]) == 0:
-            # Convert BGR to RGB
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            
-            # Resize frame for compression
-            resize_factor = quality_params["resize_factor"]
-            h, w = frame_rgb.shape[:2]
-            new_h, new_w = int(h * resize_factor), int(w * resize_factor)
-            frame_resized = cv2.resize(frame_rgb, (new_w, new_h), interpolation=cv2.INTER_AREA)
-            
-            frames.append(frame_resized)
-            
-            # Collect pixels for palette (sample subset to avoid memory issues)
-            pixels = frame_resized.reshape(-1, 3)
-            step = max(1, len(pixels) // 1000)  # Much smaller sample
-            all_pixels.extend(pixels[::step])
-        frame_count += 1
-    
-    cap.release()
-    
-    if not frames:
-        raise ValueError("No frames were extracted from the video")
-    
-    h, w = frames[0].shape[:2]
-    
-    # Limit pixels for palette generation
-    all_pixels = np.array(all_pixels)
-    if len(all_pixels) > 5000:  # Much smaller limit
-        indices = np.random.choice(len(all_pixels), 5000, replace=False)
-        all_pixels = all_pixels[indices]
-    
-    # Create smaller palette
-    palette = generate_palette(all_pixels, max_colors)
-    
-    # Create palette image for PIL
-    pal_img = Image.new("P", (1, 1))
-    flat_palette = []
-    for rgb in palette:
-        flat_palette.extend(rgb)
-    # Pad palette to 768 values if needed (256 * 3)
-    while len(flat_palette) < 768:
-        flat_palette.append(0)
-    pal_img.putpalette(flat_palette)
-    
-    # Convert frames to palette indices with better compression
-    compressed_frames = []
-    for frame in frames:
-        # Convert to PIL Image
-        pil_frame = Image.fromarray(frame, mode="RGB")
-        # Apply palette with dithering for better quality
-        frame_p = pil_frame.quantize(palette=pal_img, dither=Image.FLOYDSTEINBERG)
-        # Get indices
-        indices = np.array(frame_p, dtype=np.uint8)
-        
-        # Use higher compression level
-        compressed = zlib.compress(indices.tobytes(), level=9)
-        compressed_frames.append(compressed.hex())
-    
-    # Save to JSON format with minimal whitespace
-    data = {
-        "magic": "GENESISVID-1",
-        "width": w,
-        "height": h,
-        "fps": fps,  # Keep original FPS
-        "adjusted_fps": adjusted_fps,  # Store adjusted FPS separately
-        "skip_frames": quality_params["skip_frames"],  # Store skip info
-        "frames": compressed_frames,
-        "palette": palette.tolist()
-    }
-    
-    with open(out_path, "w") as f:
-        json.dump(data, f, separators=(',', ':'))  # No whitespace
+st.title("🎥 SoulGenesis Video Compressor")
 
-def generate_palette(pixels, num_colors):
-    """
-    Generate a palette using a simple k-means-like clustering
-    """
-    if len(pixels) == 0:
-        return np.zeros((num_colors, 3), dtype=np.uint8)
-    
-    # Simple but effective palette generation
-    # Reduce colors by quantizing each channel
-    unique_pixels = np.unique(pixels.reshape(-1, pixels.shape[-1]), axis=0)
-    
-    if len(unique_pixels) <= num_colors:
-        # Pad with black if we have fewer unique colors than requested
-        palette = np.zeros((num_colors, 3), dtype=np.uint8)
-        palette[:len(unique_pixels)] = unique_pixels
-        return palette
-    
-    # Use uniform sampling in RGB space for better distribution
-    indices = np.linspace(0, len(unique_pixels) - 1, num_colors, dtype=int)
-    selected_colors = unique_pixels[indices]
-    
-    # Ensure we have exactly num_colors
-    if len(selected_colors) < num_colors:
-        padding = np.zeros((num_colors - len(selected_colors), 3), dtype=np.uint8)
-        selected_colors = np.vstack([selected_colors, padding])
-    
-    return selected_colors
+# Initialize session state
+if "compress_complete" not in st.session_state:
+    st.session_state.compress_complete = False
 
-def decompress_video(in_path, out_path):
-    """
-    Decompress a GENESISVID-1 file back to MP4
-    """
-    in_path = Path(in_path)
-    out_path = Path(out_path)
-    
-    with open(in_path, "r") as f:
-        data = json.load(f)
-    
-    if data.get("magic") != "GENESISVID-1":
-        raise ValueError("Not a GENESISVID-1 file.")
-    
-    w = int(data["width"])
-    h = int(data["height"])
-    
-    # Use original FPS for proper playback speed
-    fps = float(data.get("fps", 24))
-    skip_frames = data.get("skip_frames", 1)
-    
-    # Calculate the correct playback FPS
-    # Since we skipped frames during compression, we need to account for that
-    playback_fps = fps / skip_frames
-    
-    frames_hex = data["frames"]
-    palette = np.array(data["palette"], dtype=np.uint8)
-    
-    # Create palette image
-    pal_img = Image.new("P", (1, 1))
-    flat_palette = []
-    for rgb in palette:
-        flat_palette.extend(rgb)
-    # Pad to 768 if needed
-    while len(flat_palette) < 768:
-        flat_palette.append(0)
-    pal_img.putpalette(flat_palette)
-    
-    # Initialize video writer with correct FPS
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    writer = cv2.VideoWriter(str(out_path), fourcc, playback_fps, (w, h))
-    
-    if not writer.isOpened():
-        raise RuntimeError("Could not open VideoWriter. Try changing the output to .avi extension.")
-    
+st.header("Compress a video → .genesisvid")
+uploaded_file = st.file_uploader("Upload MP4/MOV", type=["mp4", "mov", "mpeg4"], key="compress_uploader")
+
+palette_sample_rate = st.number_input(
+    "Palette sample every N frames", min_value=1, value=10
+)
+frame_limit = st.number_input(
+    "Limit frames (0 = all)", min_value=0, value=0
+)
+
+col1, col2 = st.columns([1, 1])
+with col1:
+    quality = st.selectbox("Compression Quality", 
+                          ["High", "Medium", "Low"], 
+                          index=1)
+with col2:
+    max_colors = st.number_input("Max palette colors", min_value=16, max_value=256, value=64)
+
+if uploaded_file is not None and not st.session_state.compress_complete:
     try:
-        for hx in frames_hex:
-            # Decompress frame indices
-            raw = zlib.decompress(bytes.fromhex(hx))
-            idx = np.frombuffer(raw, dtype=np.uint8).reshape((h, w))
+        # Create unique temp file paths
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_input:
+            tmp_input.write(uploaded_file.read())
+            in_path = tmp_input.name
+        
+        # Create output path
+        out_path = str(Path(in_path).with_suffix(".genesisvid"))
+        
+        # Set quality parameters
+        quality_params = {
+            "High": {"skip_frames": 1, "resize_factor": 0.8},
+            "Medium": {"skip_frames": 2, "resize_factor": 0.6}, 
+            "Low": {"skip_frames": 3, "resize_factor": 0.4}
+        }
+        
+        with st.spinner("Compressing video..."):
+            # Compress the video
+            compress_video(in_path, out_path, palette_sample_rate, frame_limit, 
+                         max_colors, quality_params[quality])
+        
+        st.success("✅ Compression complete!")
+        
+        # Read the compressed file and offer download
+        with open(out_path, "rb") as f:
+            compressed_data = f.read()
             
-            # Convert indices back to RGB using palette
-            frame_p = Image.fromarray(idx, mode="P")
-            frame_p.putpalette(pal_img.getpalette())
-            frame_rgb = frame_p.convert("RGB")
+        # Show compression stats
+        original_size = len(uploaded_file.getvalue())
+        compressed_size = len(compressed_data)
+        compression_ratio = original_size / compressed_size if compressed_size > 0 else 0
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Original Size", f"{original_size/1024/1024:.1f} MB")
+        with col2:
+            st.metric("Compressed Size", f"{compressed_size/1024/1024:.1f} MB") 
+        with col3:
+            st.metric("Compression Ratio", f"{compression_ratio:.1f}x")
             
-            # Convert RGB to BGR for OpenCV
-            frame_bgr = cv2.cvtColor(np.array(frame_rgb), cv2.COLOR_RGB2BGR)
-            writer.write(frame_bgr)
-    
-    finally:
-        writer.release()
-    
-    return str(out_path)
+        st.download_button(
+            label="⬇ Download Compressed File (.genesisvid)",
+            data=compressed_data,
+            file_name="compressed.genesisvid",
+            mime="application/octet-stream"
+        )
+        
+        st.session_state.compress_complete = True
+        
+        # Clean up temporary files
+        try:
+            os.unlink(in_path)
+            os.unlink(out_path)
+        except:
+            pass  # Don't fail if cleanup fails
+            
+    except Exception as e:
+        st.error(f"Error during compression: {str(e)}")
+
+# Reset button
+if st.session_state.compress_complete:
+    if st.button("🔄 Compress Another Video"):
+        st.session_state.compress_complete = False
+        st.rerun()
+
+st.header("Reconstruct video from .genesisvid")
+uploaded_genesis = st.file_uploader("Upload .genesisvid", type=["genesisvid"], key="decompress_uploader")
+
+if uploaded_genesis is not None:
+    try:
+        # Create unique temp file paths
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".genesisvid") as tmp_input:
+            tmp_input.write(uploaded_genesis.read())
+            in_path = tmp_input.name
+        
+        # Create output path
+        out_path = str(Path(in_path).with_suffix(".mp4"))
+        
+        # Decompress the video
+        decompress_video(in_path, out_path)
+        
+        st.success("✅ Decompression complete!")
+        
+        # Read the decompressed file and offer download
+        with open(out_path, "rb") as f:
+            video_data = f.read()
+            st.download_button(
+                label="⬇ Download Reconstructed Video (.mp4)",
+                data=video_data,
+                file_name="reconstructed.mp4",
+                mime="video/mp4"
+            )
+        
+        # Clean up temporary files
+        try:
+            os.unlink(in_path)
+            os.unlink(out_path)
+        except:
+            pass  # Don't fail if cleanup fails
+            
+    except Exception as e:
+        st.error(f"Error during decompression: {str(e)}")

@@ -22,9 +22,6 @@ def compress_video(in_path, out_path, palette_sample_rate=10, frame_limit=0, max
     if fps <= 0:
         fps = 24  # Default fallback
     
-    # Adjust FPS based on frame skipping
-    adjusted_fps = fps / quality_params["skip_frames"]
-    
     frames = []
     frame_count = 0
     all_pixels = []
@@ -101,7 +98,8 @@ def compress_video(in_path, out_path, palette_sample_rate=10, frame_limit=0, max
         "magic": "GENESISVID-1",
         "width": w,
         "height": h,
-        "fps": adjusted_fps,  # Use adjusted FPS
+        "fps": fps,  # Keep original FPS
+        "skip_frames": quality_params["skip_frames"],  # Store skip info
         "frames": compressed_frames,
         "palette": palette.tolist()
     }
@@ -152,7 +150,15 @@ def decompress_video(in_path, out_path):
     
     w = int(data["width"])
     h = int(data["height"])
-    fps = float(data["fps"])
+    
+    # Use original FPS for proper playback speed
+    fps = float(data.get("fps", 24))
+    skip_frames = data.get("skip_frames", 1)
+    
+    # Calculate the correct playback FPS
+    # Since we skipped frames during compression, we need to account for that
+    playback_fps = fps / skip_frames
+    
     frames_hex = data["frames"]
     palette = np.array(data["palette"], dtype=np.uint8)
     
@@ -166,9 +172,9 @@ def decompress_video(in_path, out_path):
         flat_palette.append(0)
     pal_img.putpalette(flat_palette)
     
-    # Initialize video writer
+    # Initialize video writer with correct FPS
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    writer = cv2.VideoWriter(str(out_path), fourcc, fps, (w, h))
+    writer = cv2.VideoWriter(str(out_path), fourcc, playback_fps, (w, h))
     
     if not writer.isOpened():
         raise RuntimeError("Could not open VideoWriter. Try changing the output to .avi extension.")
