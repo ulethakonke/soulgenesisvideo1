@@ -34,8 +34,8 @@ def compress_video(in_path, out_path, palette_sample_rate=10, frame_limit=0, max
         if frame_limit and frame_count >= frame_limit:
             break
         
-        # Skip frames for compression
-        if frame_count % (palette_sample_rate * quality_params["skip_frames"]) == 0:
+        # Skip frames for compression - but not too aggressively
+        if frame_count % palette_sample_rate == 0:
             # Convert BGR to RGB
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             
@@ -60,8 +60,8 @@ def compress_video(in_path, out_path, palette_sample_rate=10, frame_limit=0, max
     
     h, w = frames[0].shape[:2]
     
-    # Calculate the actual frame interval we used
-    actual_frame_interval = palette_sample_rate * quality_params["skip_frames"]
+    # Calculate the actual frame interval we used (just palette_sample_rate now)
+    actual_frame_interval = palette_sample_rate
     
     # Limit pixels for palette generation
     all_pixels = np.array(all_pixels)
@@ -161,6 +161,10 @@ def decompress_video(in_path, out_path):
     # Calculate the correct playback FPS
     # If we took every Nth frame, we need to play back at fps/N to maintain correct timing
     playback_fps = fps / frame_interval
+    
+    # Ensure minimum playback FPS for smoothness
+    if playback_fps < 15:
+        playback_fps = 15
     
     print(f"Original FPS: {fps}, Frame interval: {frame_interval}, Playback FPS: {playback_fps}")
     

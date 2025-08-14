@@ -14,7 +14,7 @@ st.header("Compress a video → .genesisvid")
 uploaded_file = st.file_uploader("Upload MP4/MOV", type=["mp4", "mov", "mpeg4"], key="compress_uploader")
 
 palette_sample_rate = st.number_input(
-    "Palette sample every N frames", min_value=1, value=10
+    "Sample every N frames", min_value=1, value=3, help="Lower = better quality, larger file"
 )
 frame_limit = st.number_input(
     "Limit frames (0 = all)", min_value=0, value=0
@@ -38,11 +38,11 @@ if uploaded_file is not None and not st.session_state.compress_complete:
         # Create output path
         out_path = str(Path(in_path).with_suffix(".genesisvid"))
         
-        # Set quality parameters
+        # Set quality parameters - focus on resolution and colors, not frame skipping
         quality_params = {
-            "High": {"skip_frames": 1, "resize_factor": 0.8},
-            "Medium": {"skip_frames": 2, "resize_factor": 0.6}, 
-            "Low": {"skip_frames": 3, "resize_factor": 0.4}
+            "High": {"skip_frames": 1, "resize_factor": 0.9},
+            "Medium": {"skip_frames": 1, "resize_factor": 0.7}, 
+            "Low": {"skip_frames": 1, "resize_factor": 0.5}
         }
         
         with st.spinner("Compressing video..."):
