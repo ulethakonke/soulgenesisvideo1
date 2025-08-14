@@ -1,13 +1,29 @@
 import cv2
 import numpy as np
-import pickle
+import json
+import zlib
+from PIL import Image
 from pathlib import Path
 
 def compress_video(in_path, out_path, palette_sample_rate=10, frame_limit=0):
+    """
+    Compress a video to GENESISVID-1 format using palette-based compression
+    """
     cap = cv2.VideoCapture(str(in_path))
+    
+    if not cap.isOpened():
+        raise ValueError(f"Could not open video file: {in_path}")
+    
+    # Get video properties before processing
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    if fps <= 0:
+        fps = 24  # Default fallback
+    
     frames = []
     frame_count = 0
-
+    all_pixels = []
+    
+    # First pass: collect frames and pixels for palette generation
     while True:
         ret, frame = cap.read()
         if not ret:
@@ -15,33 +31,140 @@ def compress_video(in_path, out_path, palette_sample_rate=10, frame_limit=0):
         if frame_limit and frame_count >= frame_limit:
             break
         if frame_count % palette_sample_rate == 0:
-            frames.append(frame)
+            # Convert BGR to RGB
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            frames.append(frame_rgb)
+            # Collect pixels for palette (sample subset to avoid memory issues)
+            pixels = frame_rgb.reshape(-1, 3)
+            step = max(1, len(pixels) // 10000)  # Sample at most 10k pixels per frame
+            all_pixels.extend(pixels[::step])
         frame_count += 1
-
+    
     cap.release()
-
-    # Very basic palette compression simulation
+    
+    if not frames:
+        raise ValueError("No frames were extracted from the video")
+    
+    h, w = frames[0].shape[:2]
+    
+    # Generate palette using k-means-like approach (simplified)
+    all_pixels = np.array(all_pixels)
+    if len(all_pixels) > 50000:  # Limit pixels for performance
+        indices = np.random.choice(len(all_pixels), 50000, replace=False)
+        all_pixels = all_pixels[indices]
+    
+    # Create palette (256 colors max for 8-bit indices)
+    palette = generate_palette(all_pixels, 256)
+    
+    # Create palette image for PIL
+    pal_img = Image.new("P", (1, 1))
+    flat_palette = []
+    for rgb in palette:
+        flat_palette.extend(rgb)
+    # Pad palette to 768 values if needed (256 * 3)
+    while len(flat_palette) < 768:
+        flat_palette.append(0)
+    pal_img.putpalette(flat_palette)
+    
+    # Convert frames to palette indices
+    compressed_frames = []
+    for frame in frames:
+        # Convert to PIL Image
+        pil_frame = Image.fromarray(frame, mode="RGB")
+        # Apply palette
+        frame_p = pil_frame.quantize(palette=pal_img)
+        # Get indices
+        indices = np.array(frame_p)
+        # Compress indices
+        compressed = zlib.compress(indices.tobytes())
+        compressed_frames.append(compressed.hex())
+    
+    # Save to JSON format
     data = {
-        "frames": frames,
-        "fps": cap.get(cv2.CAP_PROP_FPS)
+        "magic": "GENESISVID-1",
+        "width": w,
+        "height": h,
+        "fps": fps,
+        "frames": compressed_frames,
+        "palette": palette.tolist()
     }
-    with open(out_path, "wb") as f:
-        pickle.dump(data, f)
+    
+    with open(out_path, "w") as f:
+        json.dump(data, f, separators=(',', ':'))
+
+def generate_palette(pixels, num_colors):
+    """
+    Generate a palette using a simple k-means-like clustering
+    """
+    if len(pixels) == 0:
+        return np.zeros((num_colors, 3), dtype=np.uint8)
+    
+    # Simple palette generation - you could use sklearn.cluster.KMeans for better results
+    # For now, use uniform sampling across color space
+    unique_pixels = np.unique(pixels.reshape(-1, pixels.shape[-1]), axis=0)
+    
+    if len(unique_pixels) <= num_colors:
+        # Pad with black if we have fewer unique colors than requested
+        palette = np.zeros((num_colors, 3), dtype=np.uint8)
+        palette[:len(unique_pixels)] = unique_pixels
+        return palette
+    
+    # Sample uniformly across the unique pixels
+    indices = np.linspace(0, len(unique_pixels) - 1, num_colors, dtype=int)
+    return unique_pixels[indices]
 
 def decompress_video(in_path, out_path):
-    with open(in_path, "rb") as f:
-        data = pickle.load(f)
-
-    frames = data["frames"]
-    fps = data.get("fps", 24)
-
-    if not frames:
-        raise ValueError("No frames found in compressed file.")
-
-    height, width, layers = frames[0].shape
+    """
+    Decompress a GENESISVID-1 file back to MP4
+    """
+    in_path = Path(in_path)
+    out_path = Path(out_path)
+    
+    with open(in_path, "r") as f:
+        data = json.load(f)
+    
+    if data.get("magic") != "GENESISVID-1":
+        raise ValueError("Not a GENESISVID-1 file.")
+    
+    w = int(data["width"])
+    h = int(data["height"])
+    fps = float(data["fps"])
+    frames_hex = data["frames"]
+    palette = np.array(data["palette"], dtype=np.uint8)
+    
+    # Create palette image
+    pal_img = Image.new("P", (1, 1))
+    flat_palette = []
+    for rgb in palette:
+        flat_palette.extend(rgb)
+    # Pad to 768 if needed
+    while len(flat_palette) < 768:
+        flat_palette.append(0)
+    pal_img.putpalette(flat_palette)
+    
+    # Initialize video writer
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    out = cv2.VideoWriter(str(out_path), fourcc, fps, (width, height))
-
-    for frame in frames:
-        out.write(frame)
-    out.release()
+    writer = cv2.VideoWriter(str(out_path), fourcc, fps, (w, h))
+    
+    if not writer.isOpened():
+        raise RuntimeError("Could not open VideoWriter. Try changing the output to .avi extension.")
+    
+    try:
+        for hx in frames_hex:
+            # Decompress frame indices
+            raw = zlib.decompress(bytes.fromhex(hx))
+            idx = np.frombuffer(raw, dtype=np.uint8).reshape((h, w))
+            
+            # Convert indices back to RGB using palette
+            frame_p = Image.fromarray(idx, mode="P")
+            frame_p.putpalette(pal_img.getpalette())
+            frame_rgb = frame_p.convert("RGB")
+            
+            # Convert RGB to BGR for OpenCV
+            frame_bgr = cv2.cvtColor(np.array(frame_rgb), cv2.COLOR_RGB2BGR)
+            writer.write(frame_bgr)
+    
+    finally:
+        writer.release()
+    
+    return str(out_path)
