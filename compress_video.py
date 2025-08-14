@@ -60,6 +60,9 @@ def compress_video(in_path, out_path, palette_sample_rate=10, frame_limit=0, max
     
     h, w = frames[0].shape[:2]
     
+    # Calculate the actual frame interval we used
+    actual_frame_interval = palette_sample_rate * quality_params["skip_frames"]
+    
     # Limit pixels for palette generation
     all_pixels = np.array(all_pixels)
     if len(all_pixels) > 5000:  # Much smaller limit
@@ -99,7 +102,7 @@ def compress_video(in_path, out_path, palette_sample_rate=10, frame_limit=0, max
         "width": w,
         "height": h,
         "fps": fps,  # Keep original FPS
-        "skip_frames": quality_params["skip_frames"],  # Store skip info
+        "frame_interval": actual_frame_interval,  # Store the actual frame interval we used
         "frames": compressed_frames,
         "palette": palette.tolist()
     }
@@ -153,12 +156,13 @@ def decompress_video(in_path, out_path):
     
     # Use original FPS for proper playback speed
     fps = float(data.get("fps", 24))
-    skip_frames = data.get("skip_frames", 1)
+    frame_interval = data.get("frame_interval", 1)
     
-    # The playback FPS should be the original FPS
-    # We skipped frames during compression, so we have fewer frames
-    # but they should play at the original speed to maintain timing
-    playback_fps = fps
+    # Calculate the correct playback FPS
+    # If we took every Nth frame, we need to play back at fps/N to maintain correct timing
+    playback_fps = fps / frame_interval
+    
+    print(f"Original FPS: {fps}, Frame interval: {frame_interval}, Playback FPS: {playback_fps}")
     
     frames_hex = data["frames"]
     palette = np.array(data["palette"], dtype=np.uint8)
