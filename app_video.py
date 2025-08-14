@@ -1,47 +1,45 @@
 import streamlit as st
-from pathlib import Path
-import tempfile
 from compress_video import compress_video
 from decompress_video import decompress_video
+from pathlib import Path
+import tempfile
 
-st.set_page_config(page_title="SoulGenesis Video", page_icon="🎬", layout="centered")
-st.title("🎬 SoulGenesis – Video Compression & Reconstruction")
+st.set_page_config(page_title="SoulGenesis Video", page_icon="🎥", layout="centered")
+st.title("🎥 SoulGenesis – Video Compression & Reconstruction")
 
-st.markdown("Upload a **short, low-FPS** clip to compress it into a `.genesisvid` file, or upload a `.genesisvid` to reconstruct an MP4.")
+# --- Compression ---
+st.header("Compress a video → .genesisvid")
+video_file = st.file_uploader("Upload MP4/MOV", type=["mp4", "mov", "mpeg4"], key="video_upload")
 
-st.divider()
-st.subheader("Compress a video → .genesisvid")
-vid = st.file_uploader("Upload MP4/MOV", type=["mp4", "mov"], key="upl_vid")
+palette_every_n_frames = st.number_input("Palette sample every N frames", min_value=1, value=10)
+frame_limit = st.number_input("Limit frames (0 = all)", min_value=0, value=0)
 
-col1, col2 = st.columns(2)
-with col1:
-    sample_every = st.number_input("Palette sample every N frames", min_value=1, max_value=50, value=10, step=1)
-with col2:
-    max_frames = st.number_input("Limit frames (0 = all)", min_value=0, value=0, step=1)
-
-if vid:
-    with tempfile.NamedTemporaryFile(delete=False, suffix=Path(vid.name).suffix) as tmp_in:
-        tmp_in.write(vid.read())
-        in_path = Path(tmp_in.name)
-    out_path = Path(tempfile.gettempdir()) / (Path(vid.name).stem + ".genesisvid")
-    info = compress_video(in_path, out_path, sample_every=int(sample_every), max_frames=int(max_frames) or None)
-    st.success(f"Compressed {info['frames']} frames at {info['fps']:.2f} fps. Output size: {info['bytes']} bytes")
+if video_file:
+    with tempfile.NamedTemporaryFile(delete=False, suffix=Path(video_file.name).suffix) as tmp_in:
+        tmp_in.write(video_file.read())
+        tmp_in_path = tmp_in.name
+    
+    out_path = Path(tempfile.gettempdir()) / (Path(video_file.name).stem + ".genesisvid")
+    
+    compress_video(tmp_in_path, out_path, palette_every_n_frames, frame_limit)
+    
+    st.success("✅ Video compressed successfully!")
     with open(out_path, "rb") as f:
-        st.download_button("⬇️ Download .genesisvid", f, file_name=out_path.name)
+        st.download_button("⬇️ Download Compressed .genesisvid", f, file_name=out_path.name)
 
-st.divider()
-st.subheader("Reconstruct video from .genesisvid")
-gvid = st.file_uploader("Upload .genesisvid", type=["genesisvid"], key="upl_genvid")
-if gvid:
+# --- Decompression ---
+st.header("Reconstruct video from .genesisvid")
+genesisvid_file = st.file_uploader("Upload .genesisvid", type=["genesisvid"], key="genesisvid_upload")
+
+if genesisvid_file:
     with tempfile.NamedTemporaryFile(delete=False, suffix=".genesisvid") as tmp_in:
-        tmp_in.write(gvid.read())
-        in_path = Path(tmp_in.name)
-    out_path = Path(tempfile.gettempdir()) / (Path(gvid.name).stem + ".mp4")
-    try:
-        out_file = decompress_video(in_path, out_path)
-        st.video(str(out_file))
-        with open(out_file, "rb") as f:
-            st.download_button("⬇️ Download reconstructed MP4", f, file_name=Path(out_file).name)
-    except Exception as e:
-        st.error(f"Reconstruction failed: {e}")
-        st.info("If this is a codec issue on your system, try renaming output to .avi and using 'XVID' in the code.")
+        tmp_in.write(genesisvid_file.read())
+        tmp_in_path = tmp_in.name
+    
+    out_path = Path(tempfile.gettempdir()) / "reconstructed_video.mp4"
+    
+    decompress_video(tmp_in_path, out_path)
+    
+    st.success("✅ Video reconstructed successfully!")
+    with open(out_path, "rb") as f:
+        st.download_button("⬇️ Download Reconstructed Video", f, file_name="reconstructed_video.mp4")
