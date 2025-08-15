@@ -32,18 +32,18 @@ col1, col2 = st.columns(2)
 with col1:
     palette_sample_rate = st.number_input(
         "Sample every N frames", 
-        min_value=1, 
-        value=2, 
-        help="1=Best quality, 2=Good balance, 3+=Smaller file"
+        min_value=2, 
+        value=3, 
+        help="Higher = better compression, lower quality"
     )
     
 with col2:
     max_colors = st.number_input(
         "Max palette colors", 
-        min_value=16, 
-        max_value=256, 
-        value=128, 
-        help="More colors = better quality, larger file"
+        min_value=8, 
+        max_value=64, 
+        value=32, 
+        help="Fewer colors = better compression"
     )
 
 col3, col4 = st.columns(2)
@@ -71,11 +71,11 @@ if uploaded_file is not None and not st.session_state.compress_complete:
         
         out_path = str(Path(in_path).with_suffix(".genesisvid"))
         
-        # Quality settings
+        # Quality settings - more aggressive for actual compression
         quality_settings = {
-            "High": {"skip_frames": 1, "resize_factor": 0.9},
-            "Medium": {"skip_frames": 1, "resize_factor": 0.7}, 
-            "Low": {"skip_frames": 1, "resize_factor": 0.5}
+            "High": {"skip_frames": 2, "resize_factor": 0.8},    # Skip every 2nd frame, 80% size
+            "Medium": {"skip_frames": 3, "resize_factor": 0.6},  # Skip every 3rd frame, 60% size  
+            "Low": {"skip_frames": 4, "resize_factor": 0.4}      # Skip every 4th frame, 40% size
         }
         
         with st.spinner("Compressing video... This may take a few minutes."):
