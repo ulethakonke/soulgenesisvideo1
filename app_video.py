@@ -17,10 +17,15 @@ palette_sample_rate = st.number_input("Palette sample every N frames", min_value
 frame_limit = st.number_input("Limit frames (0 = all)", min_value=0, value=0)
 
 if uploaded_video is not None:
+    temp_video_path = Path("temp_input_video.mp4")
+    with open(temp_video_path, "wb") as f:
+        f.write(uploaded_video.read())  # Save uploaded file locally
+
     out_path = Path("compressed.genesisvid")
+
     if st.button("🚀 Compress Video"):
         try:
-            compress_video(uploaded_video, out_path, palette_sample_rate, frame_limit)
+            compress_video(str(temp_video_path), str(out_path), palette_sample_rate, frame_limit)
             st.success(f"Video compressed successfully: {out_path}")
 
             # Download button for compressed file
@@ -43,10 +48,15 @@ st.header("♻️ Reconstruct Video from `.genesisvid`")
 uploaded_genesis = st.file_uploader("Upload `.genesisvid`", type=["genesisvid"], key="decompress")
 
 if uploaded_genesis is not None:
+    temp_genesis_path = Path("temp_input_file.genesisvid")
+    with open(temp_genesis_path, "wb") as f:
+        f.write(uploaded_genesis.read())  # Save uploaded file locally
+
     out_video_path = Path("reconstructed.mp4")
+
     if st.button("🔄 Decompress Video"):
         try:
-            fps = decompress_video(uploaded_genesis, out_video_path)
+            fps = decompress_video(str(temp_genesis_path), str(out_video_path))
             st.success(f"Video reconstructed successfully at {fps} FPS: {out_video_path}")
 
             # Download button for reconstructed MP4
