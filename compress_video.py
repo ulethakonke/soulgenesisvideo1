@@ -1,58 +1,41 @@
 import cv2
 import numpy as np
 import pickle
-from pathlib import Path
 
-def compress_video(in_path, out_path, palette_sample_rate=1, frame_limit=0):
-    cap = cv2.VideoCapture(str(in_path))
-    if not cap.isOpened():
-        raise ValueError("Could not open video file.")
-
-    fps = cap.get(cv2.CAP_PROP_FPS)
+def compress_video(input_path, output_path, palette_sample_rate=10, frame_limit=0):
+    cap = cv2.VideoCapture(input_path)
+    fps = cap.get(cv2.CAP_PROP_FPS)  # Store FPS
     frames = []
-    frame_count = 0
+    count = 0
 
-    while True:
+    while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
             break
-        if frame_limit and frame_count >= frame_limit:
+        if frame_limit > 0 and count >= frame_limit:
             break
-        if frame_count % palette_sample_rate == 0:
-            # JPEG compression in memory
-            encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 60]  # 60% quality
-            _, buffer = cv2.imencode('.jpg', frame, encode_param)
-            frames.append(buffer)
-        frame_count += 1
-
+        if count % palette_sample_rate == 0:
+            frames.append(frame)
+        count += 1
     cap.release()
 
-    # Save FPS and compressed frames
-    data = {
-        "frames": frames,
-        "fps": fps / palette_sample_rate  # adjust playback speed for skipped frames
-    }
-    with open(out_path, "wb") as f:
+    data = {"fps": fps, "frames": frames}
+    with open(output_path, "wb") as f:
         pickle.dump(data, f)
 
-def decompress_video(in_path, out_path):
-    with open(in_path, "rb") as f:
+def decompress_video(input_path, output_path):
+    with open(input_path, "rb") as f:
         data = pickle.load(f)
 
+    fps = data["fps"]
     frames = data["frames"]
-    fps = data.get("fps", 24)
-
-    if not frames:
-        raise ValueError("No frames found in compressed file.")
-
-    # Decode one frame to get video size
-    first_frame = cv2.imdecode(np.frombuffer(frames[0], np.uint8), cv2.IMREAD_COLOR)
-    height, width, _ = first_frame.shape
+    height, width, _ = frames[0].shape
 
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    out = cv2.VideoWriter(str(out_path), fourcc, fps, (width, height))
+    out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
 
-    for buffer in frames:
-        frame = cv2.imdecode(np.frombuffer(buffer, np.uint8), cv2.IMREAD_COLOR)
+    for frame in frames:
         out.write(frame)
     out.release()
+
+    return fps  # So Streamlit can display correct FPS

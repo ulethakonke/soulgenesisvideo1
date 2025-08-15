@@ -1,6 +1,7 @@
 import streamlit as st
 from pathlib import Path
 from compress_video import compress_video, decompress_video
+import os
 
 st.set_page_config(page_title="SoulGenesis Video Compressor", layout="centered")
 
@@ -17,18 +18,19 @@ palette_sample_rate = st.number_input("Palette sample every N frames", min_value
 frame_limit = st.number_input("Limit frames (0 = all)", min_value=0, value=0)
 
 if uploaded_video is not None:
-    temp_video_path = Path("temp_input_video.mp4")
+    # Save uploaded file temporarily
+    temp_video_path = Path(uploaded_video.name)
     with open(temp_video_path, "wb") as f:
-        f.write(uploaded_video.read())  # Save uploaded file locally
+        f.write(uploaded_video.read())
 
-    out_path = Path("compressed.genesisvid")
+    # Generate output file name based on original video name
+    out_path = Path(f"{temp_video_path.stem}.genesisvid")
 
     if st.button("🚀 Compress Video"):
         try:
             compress_video(str(temp_video_path), str(out_path), palette_sample_rate, frame_limit)
-            st.success(f"Video compressed successfully: {out_path}")
+            st.success(f"Video compressed successfully: {out_path.name}")
 
-            # Download button for compressed file
             with open(out_path, "rb") as f:
                 st.download_button(
                     label="⬇️ Download Compressed .genesisvid",
@@ -48,18 +50,18 @@ st.header("♻️ Reconstruct Video from `.genesisvid`")
 uploaded_genesis = st.file_uploader("Upload `.genesisvid`", type=["genesisvid"], key="decompress")
 
 if uploaded_genesis is not None:
-    temp_genesis_path = Path("temp_input_file.genesisvid")
+    temp_genesis_path = Path(uploaded_genesis.name)
     with open(temp_genesis_path, "wb") as f:
-        f.write(uploaded_genesis.read())  # Save uploaded file locally
+        f.write(uploaded_genesis.read())
 
-    out_video_path = Path("reconstructed.mp4")
+    # Output video name matches original compressed name (without extension)
+    out_video_path = Path(f"{temp_genesis_path.stem}_reconstructed.mp4")
 
     if st.button("🔄 Decompress Video"):
         try:
             fps = decompress_video(str(temp_genesis_path), str(out_video_path))
-            st.success(f"Video reconstructed successfully at {fps} FPS: {out_video_path}")
+            st.success(f"Video reconstructed successfully at {fps} FPS: {out_video_path.name}")
 
-            # Download button for reconstructed MP4
             with open(out_video_path, "rb") as f:
                 st.download_button(
                     label="⬇️ Download Reconstructed MP4",
@@ -68,7 +70,6 @@ if uploaded_genesis is not None:
                     mime="video/mp4"
                 )
 
-            # Preview video in browser
             st.video(str(out_video_path))
 
         except Exception as e:
