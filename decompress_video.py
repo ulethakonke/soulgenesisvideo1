@@ -18,7 +18,7 @@ def decompress_video(in_path, out_path):
     frame_skip = data.get("frame_skip", 1)
     
     playback_fps = original_fps / frame_skip
-    playback_fps = max(20, min(30, playback_fps))
+    playback_fps = min(30, max(20, playback_fps))
     
     frames_hex = data["frames"]
     palette = np.array(data["palette"], dtype=np.uint8)
@@ -27,9 +27,7 @@ def decompress_video(in_path, out_path):
     flat_palette = []
     for rgb in palette:
         flat_palette.extend(rgb)
-    while len(flat_palette) < 768:
-        flat_palette.append(0)
-    pal_img.putpalette(flat_palette)
+    pal_img.putpalette(flat_palette + [0]*(768-len(flat_palette)))
     
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     writer = cv2.VideoWriter(str(out_path), fourcc, playback_fps, (w, h))
