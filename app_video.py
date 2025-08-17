@@ -1,122 +1,182 @@
 import streamlit as st
-import cv2
-import numpy as np
-import os
 import tempfile
+import os
 from pathlib import Path
 
-# -----------------------------
-# Video Compression
-# -----------------------------
-def compress_video(input_path, output_path, num_colors=64, palette_sample_rate=10, frame_limit=0):
-    cap = cv2.VideoCapture(str(input_path))
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    frames = []
+# Import compression functions
+try:
+    from compress_video import compress_video, decompress_video
+except ImportError:
+    st.error("compress_video.py not found. Make sure it's in the same directory.")
+    st.stop()
+
+st.set_page_config(page_title="SoulGenesis Video Compressor", page_icon="🎥")
+
+st.title("🎥 SoulGenesis Video Compressor")
+
+# Initialize session state
+if "compress_complete" not in st.session_state:
+    st.session_state.compress_complete = False
+
+# Compression Section
+st.header("Compress a video → .genesisvid")
+
+uploaded_file = st.file_uploader(
+    "Upload MP4/MOV", 
+    type=["mp4", "mov", "mpeg4"], 
+    key="compress_uploader"
+)
+
+# Settings
+col1, col2 = st.columns(2)
+with col1:
+    palette_sample_rate = st.number_input(
+        "Frame sampling rate", 
+        min_value=2, 
+        value=5, 
+        max_value=10,
+        help="Take every Nth frame (5 = good balance)"
+    )
     
-    # Sample frames for palette building
-    sample_frames = []
-    frame_idx = 0
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-        if frame_idx % palette_sample_rate == 0:
-            sample_frames.append(frame)
-        frames.append(frame)
-        frame_idx += 1
-        if frame_limit > 0 and frame_idx >= frame_limit:
-            break
-    cap.release()
+with col2:
+    max_colors = st.number_input(
+        "Palette colors", 
+        min_value=16, 
+        max_value=128, 
+        value=64, 
+        help="Colors in palette (64 = good balance)"
+    )
 
-    # Build palette using OpenCV k-means
-    all_pixels = np.vstack([f.reshape(-1, 3) for f in sample_frames])
-    all_pixels = np.float32(all_pixels)
-    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 1.0)
-    _, labels, palette = cv2.kmeans(all_pixels, num_colors, None, criteria, 10, cv2.KMEANS_RANDOM_CENTERS)
-    palette = np.uint8(palette)
-
-    # Quantize all frames
-    quantized_frames = []
-    for frame in frames:
-        h, w, _ = frame.shape
-        pixels = frame.reshape(-1, 3)
-        pixels = np.float32(pixels)
-        _, labels, _ = cv2.kmeans(pixels, num_colors, None, criteria, 1, cv2.KMEANS_USE_INITIAL_LABELS, centers=palette)
-        new_frame = palette[labels.flatten()].reshape(h, w, 3)
-        quantized_frames.append(new_frame)
-
-    # Save compressed data
-    np.savez_compressed(output_path, frames=quantized_frames, fps=fps, palette=palette)
-    return fps
-
-# -----------------------------
-# Video Decompression
-# -----------------------------
-def decompress_video(input_path, output_path):
-    data = np.load(input_path, allow_pickle=True)
-    frames = data['frames']
-    fps = float(data['fps'])
+col3, col4 = st.columns(2)
+with col3:
+    quality = st.selectbox(
+        "Compression Quality", 
+        ["High", "Medium", "Low"], 
+        index=1
+    )
     
-    h, w, _ = frames[0].shape
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    out = cv2.VideoWriter(str(output_path), fourcc, fps, (w, h))
+with col4:
+    frame_limit = st.number_input(
+        "Limit frames (0 = all)", 
+        min_value=0, 
+        value=0
+    )
 
-    for frame in frames:
-        out.write(frame)
-    out.release()
+# Process compression
+if uploaded_file is not None and not st.session_state.compress_complete:
+    try:
+        # Create temp file
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_input:
+            tmp_input.write(uploaded_file.read())
+            in_path = tmp_input.name
+        
+        out_path = str(Path(in_path).with_suffix(".genesisvid"))
+        
+        # Simple quality settings focused on actual compression
+        quality_settings = {
+            "High": {"skip_frames": 1, "resize_factor": 0.7},
+            "Medium": {"skip_frames": 1, "resize_factor": 0.6}, 
+            "Low": {"skip_frames": 1, "resize_factor": 0.5}
+        }
+        
+        with st.spinner("Compressing video... This may take a few minutes."):
+            compress_video(
+                in_path, 
+                out_path, 
+                palette_sample_rate, 
+                frame_limit, 
+                max_colors, 
+                quality_settings[quality]
+            )
+        
+        st.success("✅ Compression complete!")
+        
+        # Get file sizes
+        original_size = len(uploaded_file.getvalue())
+        with open(out_path, "rb") as f:
+            compressed_data = f.read()
+        compressed_size = len(compressed_data)
+        
+        # Show stats
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Original Size", f"{original_size/1024/1024:.1f} MB")
+        with col2:
+            st.metric("Compressed Size", f"{compressed_size/1024/1024:.1f} MB")
+        with col3:
+            compression_ratio = original_size / compressed_size if compressed_size > 0 else 0
+            st.metric("Compression Ratio", f"{compression_ratio:.1f}x")
+            
+        # Download button
+        st.download_button(
+            label="⬇ Download Compressed File (.genesisvid)",
+            data=compressed_data,
+            file_name="compressed.genesisvid",
+            mime="application/octet-stream"
+        )
+        
+        st.session_state.compress_complete = True
+        
+        # Cleanup
+        try:
+            os.unlink(in_path)
+            os.unlink(out_path)
+        except:
+            pass
+            
+    except Exception as e:
+        st.error(f"Error during compression: {str(e)}")
 
-# -----------------------------
-# Streamlit UI
-# -----------------------------
-st.title("🎥 SoulGenesis Video Compression")
+# Reset button
+if st.session_state.compress_complete:
+    if st.button("🔄 Compress Another Video"):
+        st.session_state.compress_complete = False
+        st.rerun()
 
-mode = st.radio("Select mode", ["Compress video → .genesisvid", "Decompress .genesisvid → video"])
+# Decompression Section
+st.header("Reconstruct video from .genesisvid")
 
-if mode == "Compress video → .genesisvid":
-    uploaded_file = st.file_uploader("Upload MP4/MOV", type=["mp4", "mov", "mpeg4"])
-    num_colors = st.slider("Number of colors in palette", 8, 256, 64)
-    palette_sample_rate = st.slider("Palette sample every N frames", 1, 30, 10)
-    frame_limit = st.number_input("Limit frames (0 = all)", min_value=0, step=1)
+uploaded_genesis = st.file_uploader(
+    "Upload .genesisvid", 
+    type=["genesisvid"], 
+    key="decompress_uploader"
+)
 
-    if uploaded_file:
-        with tempfile.NamedTemporaryFile(delete=False) as tmp:
-            tmp.write(uploaded_file.read())
-            in_path = Path(tmp.name)
+if uploaded_genesis is not None:
+    try:
+        # Create temp file
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".genesisvid") as tmp_input:
+            tmp_input.write(uploaded_genesis.read())
+            in_path = tmp_input.name
+        
+        out_path = str(Path(in_path).with_suffix(".mp4"))
+        
+        with st.spinner("Decompressing video..."):
+            decompress_video(in_path, out_path)
+        
+        st.success("✅ Decompression complete!")
+        
+        # Download button
+        with open(out_path, "rb") as f:
+            video_data = f.read()
+            
+        st.download_button(
+            label="⬇ Download Reconstructed Video (.mp4)",
+            data=video_data,
+            file_name="reconstructed.mp4",
+            mime="video/mp4"
+        )
+        
+        # Cleanup
+        try:
+            os.unlink(in_path)
+            os.unlink(out_path)
+        except:
+            pass
+            
+    except Exception as e:
+        st.error(f"Error during decompression: {str(e)}")
 
-        out_path = Path(f"{uploaded_file.name}_compressed.genesisvid")
-        if st.button("Compress"):
-            try:
-                fps = compress_video(in_path, out_path, num_colors, palette_sample_rate, frame_limit)
-                with open(out_path, "rb") as f:
-                    st.download_button(
-                        label="Download Compressed File",
-                        data=f,
-                        file_name=out_path.name,
-                        mime="application/octet-stream"
-                    )
-                st.success(f"Compression complete! Original FPS preserved: {fps:.2f}")
-            except Exception as e:
-                st.error(f"Error during compression: {e}")
-
-elif mode == "Decompress .genesisvid → video":
-    uploaded_file = st.file_uploader("Upload .genesisvid", type=["genesisvid"])
-    if uploaded_file:
-        with tempfile.NamedTemporaryFile(delete=False) as tmp:
-            tmp.write(uploaded_file.read())
-            in_path = Path(tmp.name)
-
-        out_path = Path(f"decompressed_{Path(uploaded_file.name).stem}.mp4")
-        if st.button("Decompress"):
-            try:
-                decompress_video(in_path, out_path)
-                with open(out_path, "rb") as f:
-                    st.download_button(
-                        label="Download Decompressed Video",
-                        data=f,
-                        file_name=out_path.name,
-                        mime="video/mp4"
-                    )
-                st.success("Decompression complete! Video smoothness preserved.")
-            except Exception as e:
-                st.error(f"Error during decompression: {e}")
+# Footer
+st.markdown("---")
+st.markdown("**SoulGenesis Video Compressor** - Custom video compression with palette-based encoding")
