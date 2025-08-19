@@ -1,6 +1,7 @@
 import streamlit as st
 import tempfile
 import os
+import cv2
 from pathlib import Path
 from compress_video import compress_video
 from decompress_video import decompress_video
