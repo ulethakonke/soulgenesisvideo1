@@ -2,43 +2,58 @@ import cv2
 import json
 import zlib
 import numpy as np
+import gc
 from PIL import Image
 from pathlib import Path
 
 def decompress_video(in_path, out_path):
-    # Try to read as compressed binary first (v2), then fallback to JSON (v1)
+    # Memory-efficient file reading
     try:
         with open(in_path, "rb") as f:
             compressed_data = f.read()
         
-        # Try decompressing as v2 format
+        # Try decompressing as v2/v3 format first
         try:
             json_str = zlib.decompress(compressed_data).decode('utf-8')
             data = json.loads(json_str)
+            del json_str  # Free memory
         except:
             # Fallback to v1 format (plain JSON)
             with open(in_path, "r") as f:
                 data = json.load(f)
+        
+        del compressed_data  # Free memory
+        gc.collect()
+        
     except Exception as e:
         raise ValueError(f"Could not read genesis file: {e}")
     
-    # Support both v1 and v2 formats
+    # Support v1, v2, and v3 formats
     magic = data.get("magic", "GENESISVID-1")
-    if magic not in ["GENESISVID-1", "GENESISVID-2"]:
+    if magic not in ["GENESISVID-1", "GENESISVID-2", "GENESISVID-3"]:
         raise ValueError(f"Unsupported format: {magic}")
     
     w = int(data["width"])
     h = int(data["height"])
     original_fps = float(data.get("original_fps", 24))
-    frame_skip = data.get("frame_skip", 1)
     
-    # Calculate smooth playback FPS
-    # Ensure minimum 15 FPS for smooth playback
-    playback_fps = original_fps / frame_skip
-    if playback_fps < 15:
-        playback_fps = 15
-    elif playback_fps > 60:
-        playback_fps = 60
+    # v3 format has better duration preservation
+    if magic == "GENESISVID-3":
+        target_fps = data.get("target_fps", 20)
+        original_duration = data.get("original_duration", 0)
+        preserved_duration = data.get("preserved_duration", 0)
+        frame_skip = data.get("frame_skip", 1)
+        
+        # Use target FPS for accurate playback
+        playback_fps = target_fps
+        print(f"v3: Original {original_duration:.1f}s -> Preserved {preserved_duration:.1f}s at {playback_fps} FPS")
+    else:
+        # Legacy format handling
+        frame_skip = data.get("frame_skip", 1)
+        playback_fps = original_fps / frame_skip
+        
+    # Ensure reasonable FPS range
+    playback_fps = max(12, min(60, playback_fps))
     
     frames_hex = data["frames"]
     palette = np.array(data["palette"], dtype=np.uint8)
@@ -50,7 +65,7 @@ def decompress_video(in_path, out_path):
         flat_palette.extend(rgb)
     pal_img.putpalette(flat_palette + [0]*(768-len(flat_palette)))
     
-    # Use better codec for smoother playback
+    # Use better codec and settings
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     writer = cv2.VideoWriter(str(out_path), fourcc, playback_fps, (w, h))
     
@@ -58,74 +73,76 @@ def decompress_video(in_path, out_path):
         raise RuntimeError("Could not open VideoWriter")
     
     try:
-        processed_frames = []
+        # Process frames in memory-efficient batches
+        batch_size = 20
+        total_frames = len(frames_hex)
         
-        # First pass: decompress all frames
-        for i, hx in enumerate(frames_hex):
-            try:
-                raw = zlib.decompress(bytes.fromhex(hx))
-                idx = np.frombuffer(raw, dtype=np.uint8).reshape((h, w))
-                
-                frame_p = Image.fromarray(idx, mode="P")
-                frame_p.putpalette(pal_img.getpalette())
-                frame_rgb = frame_p.convert("RGB")
-                
-                # Apply smoothing filter to reduce blockiness
-                frame_array = np.array(frame_rgb)
-                processed_frames.append(frame_array)
-                
-            except Exception as e:
-                print(f"Warning: Could not decompress frame {i}: {e}")
-                # Use previous frame if available
-                if processed_frames:
-                    processed_frames.append(processed_frames[-1])
-        
-        # Second pass: apply temporal smoothing and frame interpolation
-        smoothed_frames = []
-        
-        for i, frame in enumerate(processed_frames):
-            current_frame = frame.copy()
+        for batch_start in range(0, total_frames, batch_size):
+            batch_end = min(batch_start + batch_size, total_frames)
+            batch_frames = []
             
-            # Temporal smoothing: blend with adjacent frames
-            if i > 0 and i < len(processed_frames) - 1:
-                prev_frame = processed_frames[i-1]
-                next_frame = processed_frames[i+1]
+            # Decompress batch
+            for i in range(batch_start, batch_end):
+                try:
+                    hx = frames_hex[i]
+                    raw = zlib.decompress(bytes.fromhex(hx))
+                    idx = np.frombuffer(raw, dtype=np.uint8).reshape((h, w))
+                    
+                    frame_p = Image.fromarray(idx, mode="P")
+                    frame_p.putpalette(pal_img.getpalette())
+                    frame_rgb = frame_p.convert("RGB")
+                    frame_array = np.array(frame_rgb)
+                    
+                    batch_frames.append(frame_array)
+                    
+                    # Clean up immediately
+                    del raw, idx, frame_p, frame_rgb
+                    
+                except Exception as e:
+                    print(f"Warning: Could not decompress frame {i}: {e}")
+                    # Use previous frame if available
+                    if batch_frames:
+                        batch_frames.append(batch_frames[-1].copy())
+                    elif batch_start > 0:
+                        # Use a black frame as fallback
+                        black_frame = np.zeros((h, w, 3), dtype=np.uint8)
+                        batch_frames.append(black_frame)
+            
+            # Apply smoothing to batch
+            smoothed_batch = []
+            for j, frame in enumerate(batch_frames):
+                current_frame = frame.copy()
                 
-                # Weighted average for smoother transitions
-                current_frame = (
-                    0.7 * current_frame.astype(np.float32) +
-                    0.15 * prev_frame.astype(np.float32) +
-                    0.15 * next_frame.astype(np.float32)
-                ).astype(np.uint8)
-            
-            # Apply gentle gaussian blur to reduce pixelation
-            current_frame = cv2.GaussianBlur(current_frame, (3, 3), 0.5)
-            
-            smoothed_frames.append(current_frame)
-        
-        # Frame interpolation for very low frame rates
-        if playback_fps < 20 and len(smoothed_frames) > 1:
-            interpolated_frames = []
-            for i in range(len(smoothed_frames) - 1):
-                interpolated_frames.append(smoothed_frames[i])
+                # Temporal smoothing within batch
+                if j > 0 and j < len(batch_frames) - 1:
+                    prev_frame = batch_frames[j-1]
+                    next_frame = batch_frames[j+1]
+                    
+                    # Gentle blending
+                    current_frame = (
+                        0.8 * current_frame.astype(np.float32) +
+                        0.1 * prev_frame.astype(np.float32) +
+                        0.1 * next_frame.astype(np.float32)
+                    ).astype(np.uint8)
                 
-                # Add interpolated frame between current and next
-                current = smoothed_frames[i].astype(np.float32)
-                next_frame = smoothed_frames[i + 1].astype(np.float32)
-                interpolated = (0.5 * current + 0.5 * next_frame).astype(np.uint8)
-                interpolated_frames.append(interpolated)
+                # Light smoothing filter
+                current_frame = cv2.GaussianBlur(current_frame, (3, 3), 0.3)
+                smoothed_batch.append(current_frame)
             
-            # Add the last frame
-            interpolated_frames.append(smoothed_frames[-1])
-            smoothed_frames = interpolated_frames
-            playback_fps *= 2  # Double the FPS since we doubled frames
-        
-        # Write all frames
-        for frame in smoothed_frames:
-            frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-            writer.write(frame_bgr)
+            # Write batch to video
+            for frame in smoothed_batch:
+                frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                writer.write(frame_bgr)
+                del frame_bgr
+            
+            # Clean up batch
+            del batch_frames, smoothed_batch
+            gc.collect()
             
     finally:
         writer.release()
+        del frames_hex, palette, data
+        gc.collect()
     
+    print(f"Video reconstructed: {playback_fps} FPS, {total_frames} frames")
     return str(out_path)

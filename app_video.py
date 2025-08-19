@@ -16,6 +16,31 @@ if "compress_complete" not in st.session_state:
 
 st.header("Compress a video → .genesisvid")
 
+# Add memory status check
+@st.cache_data
+def get_memory_status():
+    try:
+        import psutil
+        import os
+        process = psutil.Process(os.getpid())
+        memory_mb = process.memory_info().rss / 1024 / 1024
+        return memory_mb
+    except:
+        return 0
+
+# Add this before the file uploader
+if st.button("🧹 Clear Memory Cache"):
+    st.cache_data.clear()
+    gc.collect()
+    st.success("✅ Memory cache cleared!")
+
+memory_mb = get_memory_status()
+if memory_mb > 0:
+    if memory_mb > 800:
+        st.error(f"⚠️ High memory usage: {memory_mb:.1f} MB. Click 'Clear Memory Cache' if experiencing issues.")
+    elif memory_mb > 400:
+        st.warning(f"📊 Memory usage: {memory_mb:.1f} MB")
+
 uploaded_file = st.file_uploader(
     "Upload MP4/MOV", 
     type=["mp4", "mov", "mpeg4"], 
@@ -89,27 +114,35 @@ if uploaded_file is not None and not st.session_state.compress_complete:
         
         out_path = str(Path(in_path).with_suffix(".genesisvid"))
         
-        # Updated quality settings for better compression
+        # Updated quality settings for better duration preservation
         quality_settings = {
-            "Ultra": {"skip_frames": 4, "resize_factor": 0.4},
-            "High": {"skip_frames": 3, "resize_factor": 0.5},
-            "Medium": {"skip_frames": 2, "resize_factor": 0.6}, 
-            "Low": {"skip_frames": 1, "resize_factor": 0.7}
+            "Ultra": {"skip_frames": 3, "resize_factor": 0.35},
+            "High": {"skip_frames": 2, "resize_factor": 0.45},
+            "Medium": {"skip_frames": 1, "resize_factor": 0.55}, 
+            "Low": {"skip_frames": 1, "resize_factor": 0.70}
         }
         
         # Adjust settings based on target FPS and motion preservation
         settings = quality_settings[quality].copy()
         
-        if preserve_motion and quality in ["Ultra", "High"]:
+        if preserve_motion:
             settings["skip_frames"] = max(1, settings["skip_frames"] - 1)
+            settings["resize_factor"] = min(0.8, settings["resize_factor"] + 0.1)
         
-        # Adjust frame skipping based on target FPS
+        # Get original FPS for duration calculation
+        import cv2
         cap_temp = cv2.VideoCapture(in_path)
         original_fps = cap_temp.get(cv2.CAP_PROP_FPS) or 24
+        original_frame_count = int(cap_temp.get(cv2.CAP_PROP_FRAME_COUNT))
+        original_duration = original_frame_count / original_fps
         cap_temp.release()
         
-        if original_fps > target_fps:
-            settings["skip_frames"] = max(settings["skip_frames"], int(original_fps / target_fps))
+        # Adjust frame skipping to maintain reasonable duration
+        if target_fps < original_fps:
+            max_skip = max(1, int(original_fps / target_fps))
+            settings["skip_frames"] = min(settings["skip_frames"], max_skip)
+        
+        st.info(f"📹 Original: {original_duration:.1f}s at {original_fps:.1f} FPS | Target: ~{target_fps} FPS")
         
         progress_bar = st.progress(0)
         status_text = st.empty()
