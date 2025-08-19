@@ -1,145 +1,172 @@
 import cv2
 import numpy as np
-import json
-import zlib
-from PIL import Image
+import gc
+import tempfile
+import os
 from pathlib import Path
-from sklearn.cluster import MiniBatchKMeans
 
-def compress_video(in_path, out_path, palette_sample_rate=5, frame_limit=0, max_colors=64, quality_params=None):
-    if quality_params is None:
-        quality_params = {"skip_frames": 1, "resize_factor": 0.5}
-    
-    cap = cv2.VideoCapture(str(in_path))
+def compress_video_direct(input_path, output_path, quality_preset="medium", target_fps=20, max_resolution=480):
+    """
+    Direct MP4 to compressed MP4 conversion - no intermediate files
+    """
+    cap = cv2.VideoCapture(str(input_path))
     if not cap.isOpened():
-        raise ValueError(f"Could not open video file: {in_path}")
+        raise ValueError(f"Could not open video file: {input_path}")
     
     try:
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        if fps <= 0:
-            fps = 24
-        
-        # Get total frame count for better sampling
+        # Get video properties
+        original_fps = cap.get(cv2.CAP_PROP_FPS) or 24
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         
-        frames = []
+        print(f"Original: {width}x{height}, {original_fps:.1f} FPS, {total_frames} frames")
+        
+        # Quality presets - aggressive compression settings
+        quality_settings = {
+            "ultra": {
+                "crf": 35,           # Higher = more compression
+                "preset": "ultrafast",
+                "scale_factor": 0.4,
+                "fps_reduction": 0.6
+            },
+            "high": {
+                "crf": 30,
+                "preset": "fast", 
+                "scale_factor": 0.5,
+                "fps_reduction": 0.7
+            },
+            "medium": {
+                "crf": 28,
+                "preset": "medium",
+                "scale_factor": 0.6,
+                "fps_reduction": 0.8
+            },
+            "low": {
+                "crf": 25,
+                "preset": "slow",
+                "scale_factor": 0.7,
+                "fps_reduction": 0.9
+            }
+        }
+        
+        settings = quality_settings[quality_preset]
+        
+        # Calculate output dimensions
+        scale = settings["scale_factor"]
+        if max(width, height) > max_resolution:
+            if width > height:
+                new_width = max_resolution
+                new_height = int(height * (max_resolution / width))
+            else:
+                new_height = max_resolution
+                new_width = int(width * (max_resolution / height))
+        else:
+            new_width = int(width * scale)
+            new_height = int(height * scale)
+        
+        # Ensure even dimensions (required for MP4)
+        new_width = new_width if new_width % 2 == 0 else new_width - 1
+        new_height = new_height if new_height % 2 == 0 else new_height - 1
+        
+        # Calculate output FPS
+        output_fps = min(target_fps, original_fps * settings["fps_reduction"])
+        output_fps = max(12, output_fps)  # Minimum 12 FPS
+        
+        print(f"Output: {new_width}x{new_height}, {output_fps:.1f} FPS")
+        
+        # Use FFmpeg-style compression with OpenCV
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        writer = cv2.VideoWriter(
+            str(output_path), 
+            fourcc, 
+            output_fps, 
+            (new_width, new_height)
+        )
+        
+        if not writer.isOpened():
+            raise RuntimeError("Could not create output video")
+        
+        # Frame processing
+        frame_skip = max(1, int(original_fps / output_fps))
         frame_count = 0
-        all_pixels = []
-        
-        # More aggressive frame skipping for better compression
-        actual_skip = max(1, quality_params["skip_frames"])
-        
-        # Memory management: limit max frames processed at once
-        max_frames_in_memory = 100
+        written_frames = 0
         
         while True:
             ret, frame = cap.read()
             if not ret:
                 break
-            if frame_limit and len(frames) >= frame_limit:
-                break
-            if len(frames) >= max_frames_in_memory:
-                break
                 
-            # Only process every nth frame for better compression
-            if frame_count % actual_skip == 0:
-                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                h, w = frame_rgb.shape[:2]
+            # Skip frames to achieve target FPS
+            if frame_count % frame_skip == 0:
+                # Resize frame
+                resized = cv2.resize(frame, (new_width, new_height), interpolation=cv2.INTER_AREA)
                 
-                # More aggressive resizing for better compression
-                resize_factor = quality_params["resize_factor"]
-                new_h = max(64, int(h * resize_factor))  # Minimum height
-                new_w = max(64, int(w * resize_factor))  # Minimum width
+                # Apply compression-friendly processing
+                # Slight blur to reduce high-frequency noise
+                resized = cv2.GaussianBlur(resized, (3, 3), 0.5)
                 
-                frame_resized = cv2.resize(frame_rgb, (new_w, new_h), interpolation=cv2.INTER_AREA)
-                frames.append(frame_resized)
+                # Reduce color depth slightly for better compression
+                resized = (resized / 4).astype(np.uint8) * 4
                 
-                # Sample pixels more efficiently for palette generation
-                if len(frames) % palette_sample_rate == 0:
-                    pixels = frame_resized.reshape(-1, 3)
-                    # Take more samples but more efficiently
-                    step = max(1, len(pixels) // 500)
-                    all_pixels.extend(pixels[::step])
+                writer.write(resized)
+                written_frames += 1
                 
-                # Clear original frame from memory immediately
-                del frame, frame_rgb
+                # Memory cleanup
+                del resized
                 
+            del frame
             frame_count += 1
-    
+            
+            # Periodic garbage collection
+            if frame_count % 100 == 0:
+                gc.collect()
+        
+        print(f"Processed {frame_count} frames, wrote {written_frames} frames")
+        
     finally:
         cap.release()
+        writer.release()
+        gc.collect()
     
-    if not frames:
-        raise ValueError("No frames extracted")
+    return str(output_path)
+
+def get_video_info(file_path):
+    """Get video file information"""
+    cap = cv2.VideoCapture(str(file_path))
+    if not cap.isOpened():
+        return None
     
-    h, w = frames[0].shape[:2]
-    
-    # Optimize palette generation
-    all_pixels = np.array(all_pixels)
-    if len(all_pixels) > 2000:
-        indices = np.random.choice(len(all_pixels), 2000, replace=False)
-        all_pixels = all_pixels[indices]
-    
-    # Generate optimized palette
-    palette = generate_palette(all_pixels, max_colors)
-    
-    # Create PIL palette
-    pal_img = Image.new("P", (1, 1))
-    flat_palette = []
-    for rgb in palette:
-        flat_palette.extend(rgb)
-    pal_img.putpalette(flat_palette + [0]*(768-len(flat_palette)))
-    
-    compressed_frames = []
-    for i, frame in enumerate(frames):
-        pil_frame = Image.fromarray(frame)
+    try:
+        fps = cap.get(cv2.CAP_PROP_FPS) or 24
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        duration = frame_count / fps
         
-        # Use better quantization with error diffusion for smoother results
-        frame_p = pil_frame.quantize(palette=pal_img, dither=Image.Dither.FLOYDSTEINBERG)
-        indices = np.array(frame_p, dtype=np.uint8)
-        
-        # Use maximum compression
-        compressed = zlib.compress(indices.tobytes(), level=9)
-        compressed_frames.append(compressed.hex())
-    
-    # Store additional metadata for better reconstruction
-    data = {
-        "magic": "GENESISVID-2",  # Updated version
-        "width": w,
-        "height": h,
-        "original_fps": fps,
-        "frame_skip": actual_skip,
-        "total_original_frames": total_frames,
-        "frames": compressed_frames,
-        "palette": palette.tolist(),
-        "version": "2.0"
+        return {
+            "fps": fps,
+            "frame_count": frame_count,
+            "width": width,
+            "height": height,
+            "duration": duration
+        }
+    finally:
+        cap.release()
+
+# Legacy function for backwards compatibility
+def compress_video(in_path, out_path, palette_sample_rate=5, frame_limit=0, max_colors=64, quality_params=None):
+    """
+    Legacy function - redirects to direct compression
+    """
+    quality_map = {
+        1: "ultra",
+        2: "high", 
+        3: "medium",
+        4: "low"
     }
     
-    # Compress the entire JSON for even better compression
-    json_str = json.dumps(data, separators=(',', ':'))
-    final_compressed = zlib.compress(json_str.encode('utf-8'), level=9)
+    skip_frames = quality_params.get("skip_frames", 2) if quality_params else 2
+    quality = quality_map.get(skip_frames, "medium")
     
-    with open(out_path, "wb") as f:
-        f.write(final_compressed)
-
-def generate_palette(pixels, num_colors):
-    if len(pixels) == 0:
-        return np.zeros((num_colors, 3), dtype=np.uint8)
-    
-    unique_pixels = np.unique(pixels.reshape(-1, 3), axis=0)
-    
-    if len(unique_pixels) <= num_colors:
-        palette = np.zeros((num_colors, 3), dtype=np.uint8)
-        palette[:len(unique_pixels)] = unique_pixels
-        return palette
-    
-    # Use better clustering parameters
-    kmeans = MiniBatchKMeans(
-        n_clusters=num_colors, 
-        random_state=42,
-        batch_size=min(1000, len(pixels)),
-        max_iter=100,
-        n_init=3
-    )
-    kmeans.fit(pixels)
-    return kmeans.cluster_centers_.astype(np.uint8)
+    return compress_video_direct(in_path, out_path, quality)
