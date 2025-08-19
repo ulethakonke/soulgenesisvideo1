@@ -2,6 +2,7 @@ import streamlit as st
 import tempfile
 import os
 import cv2
+import gc  # Garbage collection
 from pathlib import Path
 from compress_video import compress_video
 from decompress_video import decompress_video
@@ -20,6 +21,14 @@ uploaded_file = st.file_uploader(
     type=["mp4", "mov", "mpeg4"], 
     key="compress_uploader"
 )
+
+# Add file size check
+if uploaded_file is not None:
+    file_size_mb = len(uploaded_file.getvalue()) / 1024 / 1024
+    if file_size_mb > 100:
+        st.warning(f"⚠️ Large file detected ({file_size_mb:.1f} MB). Consider using Ultra quality for better memory usage.")
+    elif file_size_mb > 50:
+        st.info(f"📁 File size: {file_size_mb:.1f} MB - This may take a few minutes to process.")
 
 col1, col2 = st.columns(2)
 with col1:
@@ -116,6 +125,9 @@ if uploaded_file is not None and not st.session_state.compress_complete:
                 settings
             )
             progress_bar.progress(100)
+            
+            # Force garbage collection after compression
+            gc.collect()
         
         st.success("✅ Compression complete!")
         
@@ -149,6 +161,9 @@ if uploaded_file is not None and not st.session_state.compress_complete:
         try:
             os.unlink(in_path)
             os.unlink(out_path)
+            # Force cleanup
+            del compressed_data
+            gc.collect()
         except:
             pass
             
@@ -206,6 +221,9 @@ if uploaded_genesis is not None:
         try:
             os.unlink(in_path)
             os.unlink(out_path)
+            # Force cleanup
+            del video_data
+            gc.collect()
         except:
             pass
             

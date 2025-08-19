@@ -14,50 +14,60 @@ def compress_video(in_path, out_path, palette_sample_rate=5, frame_limit=0, max_
     if not cap.isOpened():
         raise ValueError(f"Could not open video file: {in_path}")
     
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    if fps <= 0:
-        fps = 24
+    try:
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        if fps <= 0:
+            fps = 24
+        
+        # Get total frame count for better sampling
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        
+        frames = []
+        frame_count = 0
+        all_pixels = []
+        
+        # More aggressive frame skipping for better compression
+        actual_skip = max(1, quality_params["skip_frames"])
+        
+        # Memory management: limit max frames processed at once
+        max_frames_in_memory = 100
+        
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            if frame_limit and len(frames) >= frame_limit:
+                break
+            if len(frames) >= max_frames_in_memory:
+                break
+                
+            # Only process every nth frame for better compression
+            if frame_count % actual_skip == 0:
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                h, w = frame_rgb.shape[:2]
+                
+                # More aggressive resizing for better compression
+                resize_factor = quality_params["resize_factor"]
+                new_h = max(64, int(h * resize_factor))  # Minimum height
+                new_w = max(64, int(w * resize_factor))  # Minimum width
+                
+                frame_resized = cv2.resize(frame_rgb, (new_w, new_h), interpolation=cv2.INTER_AREA)
+                frames.append(frame_resized)
+                
+                # Sample pixels more efficiently for palette generation
+                if len(frames) % palette_sample_rate == 0:
+                    pixels = frame_resized.reshape(-1, 3)
+                    # Take more samples but more efficiently
+                    step = max(1, len(pixels) // 500)
+                    all_pixels.extend(pixels[::step])
+                
+                # Clear original frame from memory immediately
+                del frame, frame_rgb
+                
+            frame_count += 1
     
-    # Get total frame count for better sampling
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    
-    frames = []
-    frame_count = 0
-    all_pixels = []
-    
-    # More aggressive frame skipping for better compression
-    actual_skip = max(1, quality_params["skip_frames"])
-    
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-        if frame_limit and len(frames) >= frame_limit:
-            break
-            
-        # Only process every nth frame for better compression
-        if frame_count % actual_skip == 0:
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            h, w = frame_rgb.shape[:2]
-            
-            # More aggressive resizing for better compression
-            resize_factor = quality_params["resize_factor"]
-            new_h = max(64, int(h * resize_factor))  # Minimum height
-            new_w = max(64, int(w * resize_factor))  # Minimum width
-            
-            frame_resized = cv2.resize(frame_rgb, (new_w, new_h), interpolation=cv2.INTER_AREA)
-            frames.append(frame_resized)
-            
-            # Sample pixels more efficiently for palette generation
-            if len(frames) % palette_sample_rate == 0:
-                pixels = frame_resized.reshape(-1, 3)
-                # Take more samples but more efficiently
-                step = max(1, len(pixels) // 500)
-                all_pixels.extend(pixels[::step])
-            
-        frame_count += 1
-    
-    cap.release()
+    finally:
+        cap.release()
     
     if not frames:
         raise ValueError("No frames extracted")
