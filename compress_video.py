@@ -1,172 +1,154 @@
-import cv2
-import numpy as np
-import gc
-import tempfile
-import os
+import json
+import hashlib
+import subprocess
 from pathlib import Path
+from datetime import datetime
 
-def compress_video_direct(input_path, output_path, quality_preset="medium", target_fps=20, max_resolution=480):
-    """
-    Direct MP4 to compressed MP4 conversion - no intermediate files
-    """
-    cap = cv2.VideoCapture(str(input_path))
-    if not cap.isOpened():
-        raise ValueError(f"Could not open video file: {input_path}")
-    
+MAGIC = b"GENV1"  # .genesisvid magic bytes
+
+
+def _run_ffmpeg(cmd):
     try:
-        # Get video properties
-        original_fps = cap.get(cv2.CAP_PROP_FPS) or 24
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        
-        print(f"Original: {width}x{height}, {original_fps:.1f} FPS, {total_frames} frames")
-        
-        # Quality presets - aggressive compression settings
-        quality_settings = {
-            "ultra": {
-                "crf": 35,           # Higher = more compression
-                "preset": "ultrafast",
-                "scale_factor": 0.4,
-                "fps_reduction": 0.6
-            },
-            "high": {
-                "crf": 30,
-                "preset": "fast", 
-                "scale_factor": 0.5,
-                "fps_reduction": 0.7
-            },
-            "medium": {
-                "crf": 28,
-                "preset": "medium",
-                "scale_factor": 0.6,
-                "fps_reduction": 0.8
-            },
-            "low": {
-                "crf": 25,
-                "preset": "slow",
-                "scale_factor": 0.7,
-                "fps_reduction": 0.9
-            }
-        }
-        
-        settings = quality_settings[quality_preset]
-        
-        # Calculate output dimensions
-        scale = settings["scale_factor"]
-        if max(width, height) > max_resolution:
-            if width > height:
-                new_width = max_resolution
-                new_height = int(height * (max_resolution / width))
-            else:
-                new_height = max_resolution
-                new_width = int(width * (max_resolution / height))
-        else:
-            new_width = int(width * scale)
-            new_height = int(height * scale)
-        
-        # Ensure even dimensions (required for MP4)
-        new_width = new_width if new_width % 2 == 0 else new_width - 1
-        new_height = new_height if new_height % 2 == 0 else new_height - 1
-        
-        # Calculate output FPS
-        output_fps = min(target_fps, original_fps * settings["fps_reduction"])
-        output_fps = max(12, output_fps)  # Minimum 12 FPS
-        
-        print(f"Output: {new_width}x{new_height}, {output_fps:.1f} FPS")
-        
-        # Use FFmpeg-style compression with OpenCV
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        writer = cv2.VideoWriter(
-            str(output_path), 
-            fourcc, 
-            output_fps, 
-            (new_width, new_height)
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(
+            "ffmpeg failed. Ensure ffmpeg is installed and on PATH."
+        ) from e
+
+
+def compress_video_ffmpeg(
+    input_path,
+    output_path,
+    crf=28,
+    preset="medium",
+    target_fps=None,
+    max_resolution=None,
+    audio_bitrate="128k",
+):
+    """
+    Compress video using H.265 (HEVC) + CRF + AAC audio.
+    - crf: lower = better quality, larger file. Typical 18–32. Start with 26–28.
+    - preset: "ultrafast" ... "veryslow" (slower = smaller file).
+    - target_fps: e.g., 24; None = keep original FPS (ffmpeg will preserve).
+    - max_resolution: e.g., 720 (long side capped). None = keep original.
+    - audio_bitrate: e.g., "128k".
+    """
+    input_path = Path(input_path)
+    output_path = Path(output_path)
+
+    vf_parts = []
+    if max_resolution:
+        # Scale long side down to max_resolution, preserve aspect
+        vf_parts.append(
+            f"scale='if(gt(iw,ih),{max_resolution},-2)':'if(gt(ih,iw),{max_resolution},-2)':force_original_aspect_ratio=decrease"
         )
-        
-        if not writer.isOpened():
-            raise RuntimeError("Could not create output video")
-        
-        # Frame processing
-        frame_skip = max(1, int(original_fps / output_fps))
-        frame_count = 0
-        written_frames = 0
-        
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-                
-            # Skip frames to achieve target FPS
-            if frame_count % frame_skip == 0:
-                # Resize frame
-                resized = cv2.resize(frame, (new_width, new_height), interpolation=cv2.INTER_AREA)
-                
-                # Apply compression-friendly processing
-                # Slight blur to reduce high-frequency noise
-                resized = cv2.GaussianBlur(resized, (3, 3), 0.5)
-                
-                # Reduce color depth slightly for better compression
-                resized = (resized / 4).astype(np.uint8) * 4
-                
-                writer.write(resized)
-                written_frames += 1
-                
-                # Memory cleanup
-                del resized
-                
-            del frame
-            frame_count += 1
-            
-            # Periodic garbage collection
-            if frame_count % 100 == 0:
-                gc.collect()
-        
-        print(f"Processed {frame_count} frames, wrote {written_frames} frames")
-        
-    finally:
-        cap.release()
-        writer.release()
-        gc.collect()
-    
+    if target_fps:
+        vf_parts.append(f"fps={int(target_fps)}")
+
+    vf = ",".join(vf_parts) if vf_parts else "null"
+
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(input_path),
+        "-vf",
+        vf,
+        "-c:v",
+        "libx265",
+        "-preset",
+        str(preset),
+        "-crf",
+        str(int(crf)),
+        "-c:a",
+        "aac",
+        "-b:a",
+        str(audio_bitrate),
+        str(output_path),
+    ]
+    _run_ffmpeg(cmd)
     return str(output_path)
 
-def get_video_info(file_path):
-    """Get video file information"""
-    cap = cv2.VideoCapture(str(file_path))
-    if not cap.isOpened():
-        return None
-    
-    try:
-        fps = cap.get(cv2.CAP_PROP_FPS) or 24
-        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        duration = frame_count / fps
-        
-        return {
-            "fps": fps,
-            "frame_count": frame_count,
-            "width": width,
-            "height": height,
-            "duration": duration
-        }
-    finally:
-        cap.release()
 
-# Legacy function for backwards compatibility
-def compress_video(in_path, out_path, palette_sample_rate=5, frame_limit=0, max_colors=64, quality_params=None):
+def _sha1_file(path, chunk=1024 * 1024):
+    h = hashlib.sha1()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(chunk), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def package_as_genesisvid(
+    mp4_path,
+    genesis_path,
+    orig_name,
+    codec="libx265",
+    crf=28,
+    preset="medium",
+    target_fps=None,
+    max_resolution=None,
+):
     """
-    Legacy function - redirects to direct compression
+    Create a .genesisvid container:
+    [5B MAGIC][8B little-endian JSON length][JSON UTF-8][MP4 bytes]
     """
-    quality_map = {
-        1: "ultra",
-        2: "high", 
-        3: "medium",
-        4: "low"
+    mp4_path = Path(mp4_path)
+    genesis_path = Path(genesis_path)
+
+    meta = {
+        "orig_name": orig_name,
+        "container_version": "1",
+        "codec": codec,
+        "crf": int(crf),
+        "preset": str(preset),
+        "target_fps": int(target_fps) if target_fps else None,
+        "max_resolution": int(max_resolution) if max_resolution else None,
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "compressed_sha1": _sha1_file(mp4_path),
+        "compressed_size": mp4_path.stat().st_size,
     }
-    
-    skip_frames = quality_params.get("skip_frames", 2) if quality_params else 2
-    quality = quality_map.get(skip_frames, "medium")
-    
-    return compress_video_direct(in_path, out_path, quality)
+    meta_bytes = json.dumps(meta, separators=(",", ":")).encode("utf-8")
+    header_len = len(meta_bytes).to_bytes(8, "little")
+
+    with open(mp4_path, "rb") as fin, open(genesis_path, "wb") as fout:
+        fout.write(MAGIC)
+        fout.write(header_len)
+        fout.write(meta_bytes)
+        fout.write(fin.read())
+    return str(genesis_path), meta
+
+
+def unpack_genesisvid(genesis_path, out_mp4_path):
+    genesis_path = Path(genesis_path)
+    out_mp4_path = Path(out_mp4_path)
+
+    with open(genesis_path, "rb") as f:
+        magic = f.read(5)
+        if magic != MAGIC:
+            raise ValueError("Not a .genesisvid file (bad magic bytes).")
+        header_len = int.from_bytes(f.read(8), "little")
+        meta_bytes = f.read(header_len)
+        meta = json.loads(meta_bytes.decode("utf-8"))
+
+        with open(out_mp4_path, "wb") as out:
+            for block in iter(lambda: f.read(1024 * 1024), b""):
+                out.write(block)
+
+    # Verify hash if present
+    try:
+        sha = _sha1_file(out_mp4_path)
+        if "compressed_sha1" in meta and meta["compressed_sha1"] != sha:
+            raise ValueError("Hash mismatch: file may be corrupted.")
+    except Exception as _:
+        # Leave file for debugging but raise
+        raise
+
+    return str(out_mp4_path), meta
+
+
+def make_unique_name(stem, crf, fps, res, ext):
+    parts = [stem, f"crf{int(crf)}"]
+    parts.append(f"fps{int(fps)}" if fps else "fpsSRC")
+    parts.append(f"r{int(res)}" if res else "rSRC")
+    base = "_".join(parts)
+    return f"{base}.{ext}"
